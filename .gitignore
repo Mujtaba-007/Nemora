@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js build output
+.next/
+out/
+
+# Environment files - NEVER commit secrets
+.env
+.env.local
+.env.*
+!.env.example
+!.env.local.example
+
+# Sandbox & tooling
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+.snowflake/
+.v0-trash/
+.vercel/
+next.user-config.*
+
+# Common ignores
+.DS_Store
+Thumbs.db
+*.log

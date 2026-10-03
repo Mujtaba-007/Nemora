@@ -1,0 +1,10 @@
+# This workflow is superseded by Vercel's automatic git-based deployments.
+# Vercel deploys the frontend on every push to main — no CI action needed.
+# Keeping this file for reference; it will NOT run because the trigger is disabled.
+#
+# Original: Deploy Next.js to GitHub Pages
+# Status: DISABLED — frontend now deployed via Vercel
+
+# on:
+#   push:
+#     branches: ["main"]

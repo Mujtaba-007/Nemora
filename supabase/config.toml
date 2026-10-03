@@ -1,0 +1,14 @@
+# Supabase CLI project configuration
+project_id = "nemora"
+
+[functions.optimize]
+verify_jwt = false
+
+[functions.submit-challenge]
+verify_jwt = false
+
+[functions.stats]
+verify_jwt = false
+
+[functions.login]
+verify_jwt = false

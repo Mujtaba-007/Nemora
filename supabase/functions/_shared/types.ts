@@ -20,6 +20,19 @@ export interface OptimizeResponse {
   reduction_pct: number;
   coins_awarded: number;
   persisted: boolean;
+  claim_token?: string;
+}
+
+export interface ClaimGuestProgressRequest {
+  tokens: string[];
+}
+
+export interface ClaimGuestProgressResponse {
+  success: boolean;
+  claims_processed: number;
+  coins_claimed: number;
+  co2_claimed: number;
+  message?: string;
 }
 
 export interface SubmitChallengeRequest {

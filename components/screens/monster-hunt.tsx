@@ -10,7 +10,7 @@ import { PollutionShard } from '@/components/three/pollution-shard'
 import { CrystalOrb } from '@/components/three/crystal-orb'
 import { useCO2Store } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
-import { optimizePrompt, ApiError, type OptimizeResult } from '@/lib/api'
+import { optimizePrompt, saveGuestClaimToken, ApiError, type OptimizeResult } from '@/lib/api'
 
 export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen: number) => void }) {
   const { addCO2Saved, currentPrompt, draftPrompt, setDraftPrompt } = useCO2Store()
@@ -54,6 +54,9 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
         await refreshProfile()
         toast.success(`Hunted! Saved ${data.savings.toFixed(3)}g CO2 and earned ${data.coins_awarded} coins!`)
       } else {
+        if (data.claim_token) {
+          saveGuestClaimToken(data.claim_token)
+        }
         toast.info(`Hunted! Saved ${data.savings.toFixed(3)}g CO2. Log in to earn coins!`)
       }
     } catch (error) {

@@ -1,8 +1,10 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Beaker, Swords, TreePine, Trophy } from 'lucide-react'
 import { UserChip } from '@/components/auth/user-chip'
+import { getGlobalStats, type GlobalStats } from '@/lib/api'
 
 interface NavigationProps {
   currentScreen: number
@@ -17,6 +19,42 @@ const screens = [
 ]
 
 export function Navigation({ currentScreen, onNavigate }: NavigationProps) {
+  const [stats, setStats] = useState<GlobalStats | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [hasError, setHasError] = useState(false)
+
+  useEffect(() => {
+    let isMounted = true
+
+    const fetchStats = async () => {
+      try {
+        const data = await getGlobalStats()
+        if (isMounted) {
+          setStats(data)
+          setHasError(false)
+        }
+      } catch {
+        if (isMounted) {
+          setHasError(true)
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false)
+        }
+      }
+    }
+
+    fetchStats()
+
+    // Refresh every 60 seconds
+    const interval = setInterval(fetchStats, 60000)
+
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
+  }, [])
+
   return (
     <motion.nav
       initial={{ y: -100, opacity: 0 }}
@@ -74,8 +112,24 @@ export function Navigation({ currentScreen, onNavigate }: NavigationProps) {
         <div className="flex items-center gap-2 px-1 sm:px-2">
           <UserChip />
           <div className="hidden md:flex items-center gap-1.5 pl-2 border-l border-glass-border">
-            <div className="w-2 h-2 rounded-full bg-neon-green animate-pulse" />
-            <span className="text-[10px] font-mono text-muted-foreground">Online</span>
+            {isLoading && !stats ? (
+              <div className="flex items-center gap-1.5 animate-pulse">
+                <div className="w-2 h-2 rounded-full bg-glass-border" />
+                <div className="w-24 h-3 bg-white/10 rounded" />
+              </div>
+            ) : stats && !hasError ? (
+              <>
+                <div className="w-2 h-2 rounded-full bg-neon-green animate-pulse" />
+                <span className="text-[10px] font-mono text-muted-foreground whitespace-nowrap">
+                  {((stats.total_co2_saved || 0) / 1000).toFixed(1)} kg CO2 saved | {Math.round(stats.trees_equivalent || 0)} trees
+                </span>
+              </>
+            ) : (
+              <>
+                <div className="w-2 h-2 rounded-full bg-neon-green animate-pulse" />
+                <span className="text-[10px] font-mono text-muted-foreground">Online</span>
+              </>
+            )}
           </div>
         </div>
       </div>

@@ -3,16 +3,23 @@
 import { useRef, useMemo } from 'react'
 import { useFrame } from '@react-three/fiber'
 import type { Group, Mesh, MeshStandardMaterial } from 'three'
-import { useCO2Store } from '@/lib/store'
-
-interface GardenSceneProps {
-  trees?: { treeId: number; co2Saved: number; plantedDate: string }[]
+export interface GardenTreeItem {
+  treeId?: number
+  co2Saved: number
+  plantedDate: string
 }
 
-export function GardenScene({ trees }: GardenSceneProps = {}) {
+interface GardenSceneProps {
+  trees?: GardenTreeItem[]
+}
+
+export function GardenScene({ trees = [] }: GardenSceneProps) {
   const groupRef = useRef<Group>(null)
-  const storeStats = useCO2Store((state) => state.gardenStats)
-  const gardenStats = trees !== undefined ? trees : storeStats
+  
+  // Cap tree count at 60 for performance
+  const gardenTrees = useMemo(() => {
+    return (trees || []).slice(0, 60)
+  }, [trees])
 
   useFrame((state) => {
     if (groupRef.current) {
@@ -34,11 +41,11 @@ export function GardenScene({ trees }: GardenSceneProps = {}) {
         />
       </mesh>
 
-      {/* Trees based on CO2 saved */}
-      {gardenStats.map((stat, index) => (
+      {/* Trees based on CO2 saved (one per day with savings) */}
+      {gardenTrees.map((stat, index) => (
         <Tree
-          key={stat.treeId}
-          position={getTreePosition(index, gardenStats.length)}
+          key={stat.treeId ?? stat.plantedDate ?? index}
+          position={getDeterministicPosition(stat.plantedDate || `day-${index}`)}
           height={mapCO2ToHeight(stat.co2Saved)}
           index={index}
         />
@@ -52,15 +59,30 @@ export function GardenScene({ trees }: GardenSceneProps = {}) {
   )
 }
 
-function getTreePosition(index: number, total: number): [number, number, number] {
-  const angle = (index / total) * Math.PI * 2
-  const radius = 1.5 + (index % 2) * 0.8
+/**
+ * Deterministically places a tree on the disc seeded by the day string.
+ * This guarantees trees never jump around on re-renders or data updates.
+ */
+function getDeterministicPosition(dayStr: string): [number, number, number] {
+  let h = 2166136261
+  for (let i = 0; i < dayStr.length; i++) {
+    h ^= dayStr.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  const rand1 = ((h >>> 0) % 10000) / 10000
+  const h2 = Math.imul(h ^ 0x5bf03635, 16777619)
+  const rand2 = ((h2 >>> 0) % 10000) / 10000
+
+  const angle = rand1 * Math.PI * 2
+  // Radius between 0.8 and 3.2 on the circular ground plane of radius 4
+  const radius = 0.8 + Math.sqrt(rand2) * 2.4
+
   return [Math.cos(angle) * radius, -1, Math.sin(angle) * radius]
 }
 
 function mapCO2ToHeight(co2: number): number {
-  // Map CO2 saved (0-30) to tree height (0.5-2.5)
-  return 0.5 + (co2 / 30) * 2
+  // Height = 0.5 + min(2.0, co2_saved / 15)
+  return 0.5 + Math.min(2.0, co2 / 15)
 }
 
 interface TreeProps {

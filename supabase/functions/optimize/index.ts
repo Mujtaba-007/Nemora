@@ -3,6 +3,7 @@ import { getCorsHeaders, handleCorsPreflight } from '../_shared/cors.ts';
 import { estimateTokens, estimateCO2, formatCO2 } from '../_shared/co2.ts';
 import { getSupabaseAdmin, getSupabaseUserClient } from '../_shared/supabaseAdmin.ts';
 import { checkRateLimit } from '../_shared/rateLimiter.ts';
+import { signClaimToken } from '../_shared/claims.ts';
 import type { OptimizeRequest, OptimizeResponse, Strategy } from '../_shared/types.ts';
 
 const MAX_PROMPT_LENGTH = 4000;
@@ -233,6 +234,30 @@ serve(async (req: Request) => {
       }
     }
 
+    // 9. If unauthenticated guest with savings, generate HMAC-signed claim token
+    let claimToken: string | undefined;
+    if (!user && savings > 0) {
+      const claimSecret = Deno.env.get('GUEST_CLAIM_SECRET');
+      if (claimSecret) {
+        try {
+          claimToken = await signClaimToken(
+            {
+              claim_id: crypto.randomUUID(),
+              tokens_saved: Math.max(0, originalTokens - optimizedTokens),
+              co2_saved: savings,
+              coins: coinsAwarded,
+              timestamp: Date.now(),
+            },
+            claimSecret
+          );
+        } catch (signErr) {
+          console.error('Failed to sign guest claim token:', signErr);
+        }
+      } else {
+        console.warn('GUEST_CLAIM_SECRET is not configured; guest claim tokens disabled.');
+      }
+    }
+
     const responsePayload: OptimizeResponse = {
       original: {
         text: rawPrompt,
@@ -248,6 +273,7 @@ serve(async (req: Request) => {
       reduction_pct: reductionPct,
       coins_awarded: coinsAwarded,
       persisted,
+      claim_token: claimToken,
     };
 
     return new Response(JSON.stringify(responsePayload), {

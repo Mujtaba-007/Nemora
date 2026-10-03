@@ -21,6 +21,7 @@ export interface OptimizeResult {
   reduction_pct: number;
   coins_awarded: number;
   persisted: boolean;
+  claim_token?: string;
 }
 
 export interface SubmitChallengeParams {
@@ -233,19 +234,19 @@ export async function getDailyChallenge(): Promise<DailyChallengeData | null> {
 }
 
 export interface GardenDailyRecord {
-  user_id: string;
   day: string;
   co2_saved: number;
   optimizations_count: number;
+  user_id?: string;
 }
 
 /**
- * Fetches 30-day daily aggregated garden data for the currently authenticated user.
+ * Fetches daily aggregated garden data from garden_daily view for the signed-in user.
  */
 export async function getGardenDaily(): Promise<GardenDailyRecord[]> {
   const { data, error } = await supabase
     .from('garden_daily')
-    .select('user_id, day, co2_saved, optimizations_count')
+    .select('day, co2_saved, optimizations_count')
     .order('day', { ascending: true });
 
   if (error || !data) {
@@ -253,9 +254,90 @@ export async function getGardenDaily(): Promise<GardenDailyRecord[]> {
   }
 
   return data.map((item) => ({
-    user_id: item.user_id,
     day: item.day,
     co2_saved: Number(item.co2_saved || 0),
     optimizations_count: Number(item.optimizations_count || 0),
   }));
 }
+
+const GUEST_CLAIMS_STORAGE_KEY = 'nemora_guest_claim_tokens';
+
+/**
+ * Stores a signed guest claim token in sessionStorage for preservation across signup/login.
+ */
+export function saveGuestClaimToken(token: string): void {
+  if (typeof window === 'undefined' || !token) return;
+  try {
+    const existing = getStoredGuestClaimTokens();
+    if (!existing.includes(token)) {
+      existing.push(token);
+      sessionStorage.setItem(GUEST_CLAIMS_STORAGE_KEY, JSON.stringify(existing));
+    }
+  } catch (err) {
+    console.warn('Failed to save guest claim token to sessionStorage:', err);
+  }
+}
+
+/**
+ * Retrieves all stored guest claim tokens from sessionStorage.
+ */
+export function getStoredGuestClaimTokens(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = sessionStorage.getItem(GUEST_CLAIMS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Clears stored guest claim tokens from sessionStorage after successful claiming.
+ */
+export function clearStoredGuestClaimTokens(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.removeItem(GUEST_CLAIMS_STORAGE_KEY);
+  } catch (err) {
+    console.warn('Failed to clear guest claim tokens:', err);
+  }
+}
+
+export interface ClaimProgressResult {
+  success: boolean;
+  claims_processed: number;
+  coins_claimed: number;
+  co2_claimed: number;
+  message?: string;
+}
+
+/**
+ * Sends stored guest tokens to the claim-guest-progress Edge Function to credit the user.
+ */
+export async function claimGuestProgress(tokens: string[]): Promise<ClaimProgressResult> {
+  if (!tokens || tokens.length === 0) {
+    return {
+      success: true,
+      claims_processed: 0,
+      coins_claimed: 0,
+      co2_claimed: 0,
+    };
+  }
+
+  const { data, error } = await supabase.functions.invoke<ClaimProgressResult>('claim-guest-progress', {
+    body: { tokens },
+  });
+
+  if (error) {
+    throw new ApiError(error.message || 'Failed to claim guest progress.', 500);
+  }
+
+  if (!data) {
+    throw new ApiError('No response data from claim-guest-progress.', 500);
+  }
+
+  return data;
+}
+

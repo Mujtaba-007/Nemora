@@ -28,3 +28,5 @@ jobs:
           supabase functions deploy submit-challenge --no-verify-jwt
           supabase functions deploy stats --no-verify-jwt
           supabase functions deploy login --no-verify-jwt
+          supabase functions deploy claim-guest-progress --no-verify-jwt
+

@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useEffect, useState, useMemo } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Environment } from '@react-three/drei'
 import { motion } from 'framer-motion'
@@ -30,24 +30,44 @@ export function MyGarden({ onNavigate: _onNavigate }: { onNavigate?: (screen: nu
       .finally(() => setLoadingGarden(false))
   }, [user])
 
-  // Derive live trees from daily records (one tree per record with co2_saved > 0)
-  const liveTrees: LiveTree[] = liveRecords
-    .filter((r) => r.co2_saved > 0)
-    .map((r, index) => ({
-      treeId: index + 1,
-      co2Saved: r.co2_saved,
-      plantedDate: r.day,
-    }))
+  // Derive live trees from daily records (one tree per record with co2_saved > 0), capped at 60 for performance
+  const liveTrees: LiveTree[] = useMemo(() => {
+    return liveRecords
+      .filter((r) => r.co2_saved > 0)
+      .slice(-60)
+      .map((r, index) => ({
+        treeId: index + 1,
+        co2Saved: r.co2_saved,
+        plantedDate: r.day,
+      }))
+  }, [liveRecords])
 
-  // Derive 7-day history (last 7 entries or pad with empty)
-  const last7 = liveRecords.slice(-7)
-  const liveHistory: { date: string; saved: number }[] = last7.map((r) => ({
-    date: new Date(r.day).toLocaleDateString('en-US', { weekday: 'short' }),
-    saved: r.co2_saved,
-  }))
+  // Build 7-day bar chart from the last 7 days, with empty bars and 0g for days with no activity
+  const last7Days = useMemo(() => {
+    const days: { date: string; fullDate: string; saved: number }[] = []
+    const now = new Date()
+
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now)
+      d.setDate(now.getDate() - i)
+      const year = d.getFullYear()
+      const month = String(d.getMonth() + 1).padStart(2, '0')
+      const dayNum = String(d.getDate()).padStart(2, '0')
+      const fullDate = `${year}-${month}-${dayNum}`
+      const weekday = d.toLocaleDateString('en-US', { weekday: 'short' })
+
+      const match = liveRecords.find((r) => r.day.startsWith(fullDate))
+      days.push({
+        date: weekday,
+        fullDate,
+        saved: match ? match.co2_saved : 0,
+      })
+    }
+    return days
+  }, [liveRecords])
 
   const displayTrees = user ? liveTrees : []
-  const displayHistory = user && liveHistory.length > 0 ? liveHistory : []
+  const displayHistory = user ? last7Days : []
 
   const userCO2Saved = profile?.total_co2_saved ?? totalCO2Saved
   const totalTreesCO2 = displayTrees.reduce((sum, tree) => sum + tree.co2Saved, 0)
@@ -225,29 +245,41 @@ export function MyGarden({ onNavigate: _onNavigate }: { onNavigate?: (screen: nu
                 {user ? 'No activity this week yet.' : 'Log in to see your history.'}
               </p>
             ) : (
-              <div className="flex items-end justify-between gap-2 h-24">
-                {displayHistory.map((day, index) => (
-                  <motion.div
-                    key={day.date}
-                    initial={{ scaleY: 0 }}
-                    animate={{ scaleY: 1 }}
-                    transition={{ delay: 0.8 + index * 0.1, duration: 0.5 }}
-                    className="flex-1 flex flex-col items-center gap-1"
-                    style={{ transformOrigin: 'bottom' }}
-                  >
-                    <div
-                      className="w-full bg-gradient-to-t from-neon-green/50 to-neon-green rounded-t"
-                      style={{
-                        height: `${(day.saved / 30) * 100}%`,
-                        minHeight: '8px',
-                        boxShadow: '0 0 10px rgba(0, 255, 136, 0.3)',
-                      }}
-                    />
-                    <span className="text-xs font-mono text-muted-foreground">
-                      {day.date}
-                    </span>
-                  </motion.div>
-                ))}
+              <div className="flex items-end justify-between gap-2 h-28 pt-2">
+                {displayHistory.map((day, index) => {
+                  const maxSaved = Math.max(...displayHistory.map((d) => d.saved), 10)
+                  const heightPercent = day.saved > 0 ? Math.min(100, Math.max(12, (day.saved / maxSaved) * 100)) : 0
+
+                  return (
+                    <motion.div
+                      key={day.fullDate}
+                      initial={{ scaleY: 0 }}
+                      animate={{ scaleY: 1 }}
+                      transition={{ delay: 0.6 + index * 0.05, duration: 0.4 }}
+                      className="flex-1 flex flex-col items-center gap-1.5 h-full justify-end"
+                      style={{ transformOrigin: 'bottom' }}
+                    >
+                      <span className="text-[10px] font-mono text-muted-foreground">
+                        {day.saved > 0 ? `${day.saved.toFixed(1)}g` : '0g'}
+                      </span>
+                      <div
+                        className={`w-full rounded-t transition-all ${
+                          day.saved > 0
+                            ? 'bg-gradient-to-t from-neon-green/50 to-neon-green shadow-[0_0_10px_rgba(0,255,136,0.3)]'
+                            : 'bg-white/5 border border-white/10'
+                        }`}
+                        style={{
+                          height: day.saved > 0 ? `${heightPercent}%` : '4px',
+                          minHeight: '4px',
+                        }}
+                        title={`${day.fullDate}: ${day.saved.toFixed(2)}g CO2 saved`}
+                      />
+                      <span className="text-xs font-mono text-muted-foreground">
+                        {day.date}
+                      </span>
+                    </motion.div>
+                  )
+                })}
               </div>
             )}
           </motion.div>

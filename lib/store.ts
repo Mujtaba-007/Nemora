@@ -36,34 +36,13 @@ interface CO2State {
   setActiveScreen: (idx: number) => void;
 }
 
-const mockGardenStats = [
-  { treeId: 1, co2Saved: 15.2, plantedDate: '2024-01-15' },
-  { treeId: 2, co2Saved: 8.7, plantedDate: '2024-01-20' },
-  { treeId: 3, co2Saved: 22.4, plantedDate: '2024-02-01' },
-  { treeId: 4, co2Saved: 12.1, plantedDate: '2024-02-10' },
-  { treeId: 5, co2Saved: 18.9, plantedDate: '2024-02-15' },
-  { treeId: 6, co2Saved: 5.3, plantedDate: '2024-02-20' },
-];
-
-const mockLeaderboard: any[] = [];
-
-const mockCO2History = [
-  { date: 'Mon', saved: 12.4 },
-  { date: 'Tue', saved: 18.2 },
-  { date: 'Wed', saved: 8.7 },
-  { date: 'Thu', saved: 24.1 },
-  { date: 'Fri', saved: 15.9 },
-  { date: 'Sat', saved: 21.3 },
-  { date: 'Sun', saved: 19.8 },
-];
-
 export const useCO2Store = create<CO2State>((set, get) => ({
   currentPrompt: '',
   currentCO2: 0,
   totalCO2Saved: 0,
-  co2History: mockCO2History,
-  gardenStats: mockGardenStats,
-  leaderboard: mockLeaderboard,
+  co2History: [],
+  gardenStats: [],
+  leaderboard: [],
   dailyChallenge: {
     title: 'Optimize API Calls',
     description: 'Reduce the number of API calls by implementing efficient caching and batching',

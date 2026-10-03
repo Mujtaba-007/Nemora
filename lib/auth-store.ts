@@ -1,6 +1,24 @@
 import { create } from 'zustand';
 import type { User, RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from './supabase';
+import {
+  getStoredGuestClaimTokens,
+  clearStoredGuestClaimTokens,
+  claimGuestProgress,
+} from './api';
+
+async function syncGuestClaims(): Promise<void> {
+  const tokens = getStoredGuestClaimTokens();
+  if (tokens.length === 0) return;
+  try {
+    const res = await claimGuestProgress(tokens);
+    if (res.success && res.claims_processed > 0) {
+      clearStoredGuestClaimTokens();
+    }
+  } catch (err) {
+    console.warn('Failed to claim guest progress:', err);
+  }
+}
 
 export interface UserProfile {
   id: string;
@@ -126,6 +144,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       if (data.user && data.session) {
         set({ user: data.user, status: 'authed' });
+        await syncGuestClaims();
         await get().refreshProfile();
       }
 
@@ -185,9 +204,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isAuthModalOpen: false,
       });
 
-      await get().refreshProfile();
-
       if (userData.user) {
+        await syncGuestClaims();
+        await get().refreshProfile();
         subscribeToProfileChanges(userData.user.id, (updatedProfile) => {
           set({ profile: updatedProfile });
         });
@@ -294,6 +313,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           set({ user: currentUser, status: currentUser ? 'authed' : 'anon' });
 
           if (currentUser) {
+            if (event === 'SIGNED_IN') {
+              await syncGuestClaims();
+            }
             await get().refreshProfile();
             subscribeToProfileChanges(currentUser.id, (updatedProfile) => {
               set({ profile: updatedProfile });

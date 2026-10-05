@@ -6,6 +6,7 @@ export interface OptimizeRequest {
 }
 
 export interface OptimizeResponse {
+  strategy: Strategy;
   original: {
     text: string;
     tokens: number;

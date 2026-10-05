@@ -9,14 +9,38 @@ import type { OptimizeRequest, OptimizeResponse, Strategy } from '../_shared/typ
 const MAX_PROMPT_LENGTH = 4000;
 const DEFAULT_MODEL = 'google/gemini-2.0-flash-001';
 
+// Common preamble applied to every strategy.
+// Rules: rewrite prompts only; never answer or execute them; do not add information
+// not present in the original; keep the original language; output ONLY the rewritten
+// prompt with no preamble, commentary, or code fences.
+const STRATEGY_PREAMBLE =
+  'You rewrite prompts. You never answer or execute them. ' +
+  'Do not add any information that is not in the original. ' +
+  'Keep the original language. ' +
+  'Output ONLY the rewritten prompt — no preamble, no commentary, no code fences.';
+
 const SYSTEM_PROMPTS: Record<Strategy, string> = {
   compress:
-    'You are an environmental efficiency agent. Rewrite the following prompt to be as short, dense, and token-efficient as possible while preserving all functional requirements, intent, code snippets, and numbers verbatim. Return ONLY the rewritten text without markdown code blocks, prefixes, or explanations.',
+    `${STRATEGY_PREAMBLE}\n\n` +
+    'Strategy: COMPRESS. ' +
+    'Rewrite the prompt as the shortest possible prose that preserves every instruction, constraint, and requested output format. ' +
+    'Remove filler words, politeness phrases, repetition, and background narration. Do not use bullet points.',
+
   'facts-only':
-    'You are an environmental efficiency agent. Rewrite the following prompt extracting only core factual specifications and instructions, eliminating conversational filler, preserving all technical details, numbers, and code verbatim. Return ONLY the rewritten text without explanations.',
+    `${STRATEGY_PREAMBLE}\n\n` +
+    'Strategy: FACTS-ONLY. ' +
+    'Extract only hard facts: the task, inputs, names, numbers, code snippets, and explicit constraints. ' +
+    'Drop opinions, explanations, and all conversational language. ' +
+    'Output terse plain-text fragments, one per line, with no bullets and no headers.',
+
   bullets:
-    'You are an environmental efficiency agent. Rewrite the following prompt into ultra-concise bullet points capturing essential requirements and code/numbers verbatim. Return ONLY the bulleted text without explanations.',
+    `${STRATEGY_PREAMBLE}\n\n` +
+    'Strategy: BULLETS. ' +
+    'Restructure the prompt into a dense bulleted spec with short sections labelled Goal, Context, Requirements, Constraints, Output Format. ' +
+    'Every line must start with "- " and be a short fragment, not a full sentence.',
 };
+
+const VALID_STRATEGIES = new Set<Strategy>(['compress', 'facts-only', 'bullets']);
 
 serve(async (req: Request) => {
   // 1. Handle CORS preflight
@@ -36,7 +60,22 @@ serve(async (req: Request) => {
     // 2. Parse & validate request body
     const body: OptimizeRequest = await req.json().catch(() => ({ prompt: '' }));
     const rawPrompt = (body.prompt || '').trim();
-    const strategy: Strategy = body.strategy && SYSTEM_PROMPTS[body.strategy] ? body.strategy : 'compress';
+
+    // Strategy validation: missing → default to 'compress'; present but invalid → 400.
+    let strategy: Strategy;
+    if (!body.strategy) {
+      strategy = 'compress';
+    } else if (!VALID_STRATEGIES.has(body.strategy as Strategy)) {
+      return new Response(
+        JSON.stringify({ error: `Invalid strategy '${body.strategy}'. Must be one of: compress, facts-only, bullets.` }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    } else {
+      strategy = body.strategy as Strategy;
+    }
+
+    // Log strategy name only — never the prompt text.
+    console.log(`optimize: strategy=${strategy}`);
 
     if (!rawPrompt) {
       return new Response(JSON.stringify({ error: 'Prompt is required.' }), {
@@ -105,9 +144,12 @@ serve(async (req: Request) => {
       });
     }
 
-    const model = Deno.env.get('GROQ_MODEL') || 'llama-3.3-70b-versatile';
+    const model = Deno.env.get('GROQ_MODEL') || 'openai/gpt-oss-120b';
 
     // 6. Call Groq API (OpenAI‑compatible)
+    // Hoisted to outer scope so every use below (metrics, response) can see it.
+    let optimizedText = '';
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
@@ -124,6 +166,8 @@ serve(async (req: Request) => {
             { role: 'user', content: rawPrompt },
           ],
           temperature: 0.2,
+          max_completion_tokens: 2048,
+          reasoning_effort: 'low',
         }),
         signal: controller.signal,
       });
@@ -145,14 +189,29 @@ serve(async (req: Request) => {
       }
 
       const aiData = await groqResponse.json();
-      const optimizedText = (aiData.choices?.[0]?.message?.content || '').trim();
-      if (!optimizedText) {
+      const rawContent: string = aiData.choices?.[0]?.message?.content ?? '';
+      if (!rawContent.trim()) {
+        // Log the full response body to aid debugging when reasoning models return empty/null content
+        console.error(
+          'Groq returned empty message.content. Full response:',
+          JSON.stringify(aiData)
+        );
         return new Response(JSON.stringify({ error: 'AI returned empty output.' }), {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+      // Strip any <think>...</think> reasoning traces the model may include
+      optimizedText = rawContent.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+      if (!optimizedText) {
+        console.error('optimizedText was empty after stripping think tags. rawContent:', rawContent);
+        return new Response(JSON.stringify({ error: 'AI returned only reasoning trace with no output.' }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
     } catch (e) {
+      clearTimeout(timeout);
       if (e.name === 'AbortError') {
         console.error('Groq request timed out');
         return new Response(JSON.stringify({ error: 'AI request timed out.' }), {
@@ -167,6 +226,8 @@ serve(async (req: Request) => {
       });
     }
 
+    // Belt-and-suspenders guard: should never reach here empty, but prevents any
+    // downstream ReferenceError or stale empty-string from awarding coins.
     if (!optimizedText) {
       return new Response(JSON.stringify({ error: 'Model returned an empty response. Please retry.' }), {
         status: 500,
@@ -259,6 +320,7 @@ serve(async (req: Request) => {
     }
 
     const responsePayload: OptimizeResponse = {
+      strategy,
       original: {
         text: rawPrompt,
         tokens: originalTokens,

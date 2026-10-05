@@ -7,6 +7,7 @@ export interface OptimizeParams {
 }
 
 export interface OptimizeResult {
+  strategy: 'compress' | 'facts-only' | 'bullets';
   original: {
     text: string;
     tokens: number;

@@ -48,15 +48,16 @@ export function PromptLab({ onNavigate }: PromptLabProps) {
         initial={{ opacity: 0, x: -50 }}
         animate={{ opacity: 1, x: 0 }}
         transition={{ duration: 0.8, delay: 0.2 }}
-        className="w-full lg:w-1/2 h-[400px] lg:h-[500px]"
+        className="w-full lg:w-1/2 h-[420px] lg:h-[70vh] lg:min-h-[550px]"
       >
-        <Canvas camera={{ position: [0, 2, 6], fov: 45 }}>
+        <Canvas camera={{ position: [0, 2, 7], fov: 45 }}>
           <Suspense fallback={null}>
             <ambientLight intensity={0.3} />
             <pointLight position={[10, 10, 10]} intensity={1} color="#00FF88" />
             <pointLight position={[-10, -10, -10]} intensity={0.5} color="#4488FF" />
             <EarthTree />
             <OrbitControls
+              target={[0, 0.6, 0]}
               enableZoom={false}
               enablePan={false}
               autoRotate

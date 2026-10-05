@@ -11,15 +11,18 @@ import { CrystalOrb } from '@/components/three/crystal-orb'
 import { useCO2Store } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import { optimizePrompt, saveGuestClaimToken, ApiError, type OptimizeResult } from '@/lib/api'
+import { MAX_PROMPT_WORDS, countWords } from '@/lib/limits'
 
 export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen: number) => void }) {
-  const { addCO2Saved, currentPrompt, draftPrompt, setDraftPrompt } = useCO2Store()
+  const { addCO2Saved, currentPrompt, draftPrompt, setDraftPrompt, refreshGardenData } = useCO2Store()
   const { user, openAuthModal, refreshProfile } = useAuthStore()
   const [prompt, setPrompt] = useState(currentPrompt || '')
   const [strategy, setStrategy] = useState<'compress' | 'facts-only' | 'bullets'>('compress')
   const [isLoading, setIsLoading] = useState(false)
   const [result, setResult] = useState<OptimizeResult | null>(null)
   const [copied, setCopied] = useState(false)
+
+  const wordCount = countWords(prompt)
 
   // Pre-fill from draftPrompt (set by Prompt Lab) on mount, then clear it
   useEffect(() => {
@@ -33,25 +36,53 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
   }, [])
 
   const handleCopy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
+    let success = false
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(text)
+        success = true
+      } catch {
+        // Fallback to execCommand below
+      }
+    }
+
+    if (!success) {
+      try {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.setAttribute('readonly', '')
+        textarea.style.position = 'fixed'
+        textarea.style.left = '-9999px'
+        textarea.style.top = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        success = document.execCommand('copy')
+        document.body.removeChild(textarea)
+      } catch {
+        success = false
+      }
+    }
+
+    if (success) {
       setCopied(true)
-      toast.success('Optimized prompt copied to clipboard!')
+      toast.success('Copied to clipboard')
       setTimeout(() => setCopied(false), 2000)
-    } catch {
+    } else {
       toast.error('Failed to copy to clipboard')
     }
   }
 
   const handleOptimize = async () => {
-    if (!prompt.trim()) return
+    if (!prompt.trim() || wordCount > MAX_PROMPT_WORDS) return
     setIsLoading(true)
     try {
       const data = await optimizePrompt({ prompt, strategy })
       setResult(data)
+      setCopied(false)
       addCO2Saved(data.savings)
       if (data.persisted) {
         await refreshProfile()
+        await refreshGardenData(true)
         toast.success(`Hunted! Saved ${data.savings.toFixed(3)}g CO2 and earned ${data.coins_awarded} coins!`)
       } else {
         if (data.claim_token) {
@@ -144,15 +175,37 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
                        focus:outline-none focus:border-neon-green focus:ring-2 focus:ring-neon-green/30
                        transition-all duration-300 placeholder:text-muted-foreground"
           />
+          <div className="flex justify-end mt-1.5 px-1">
+            <span
+              className={`text-xs font-mono transition-colors ${
+                wordCount > MAX_PROMPT_WORDS
+                  ? 'text-neon-red font-semibold'
+                  : wordCount >= MAX_PROMPT_WORDS * 0.9
+                  ? 'text-amber-400'
+                  : 'text-muted-foreground'
+              }`}
+            >
+              {wordCount} / {MAX_PROMPT_WORDS} words
+            </span>
+          </div>
           <button
             onClick={handleOptimize}
-            disabled={isLoading || !prompt.trim()}
+            disabled={isLoading || !prompt.trim() || wordCount > MAX_PROMPT_WORDS}
             className="mt-4 w-full py-3 px-6 bg-neon-green/20 border border-neon-green text-neon-green 
                        font-mono font-bold rounded-xl hover:bg-neon-green/30 transition-all duration-300
                        disabled:opacity-50 disabled:cursor-not-allowed
-                       shadow-[0_0_20px_rgba(0,255,136,0.2)]"
+                       shadow-[0_0_20px_rgba(0,255,136,0.2)] flex flex-col items-center justify-center leading-tight"
           >
-            {isLoading ? 'Optimizing...' : '⚡ Hunt the Monster'}
+            {isLoading ? (
+              <span>Optimizing...</span>
+            ) : (
+              <>
+                <span>⚡ Hunt the Monster</span>
+                <span className="text-[11px] font-normal opacity-80 mt-0.5">
+                  Give a prompt of {MAX_PROMPT_WORDS} words or fewer
+                </span>
+              </>
+            )}
           </button>
         </div>
       </motion.div>
@@ -272,12 +325,11 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
                 <button
                   type="button"
                   onClick={() => handleCopy(result.optimized.text)}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-neon-green/10 border border-neon-green/30 text-neon-green hover:bg-neon-green/20 text-xs font-mono transition-all"
-                  title="Copy to clipboard"
-                  aria-label={copied ? 'Copied to clipboard' : 'Copy optimized prompt to clipboard'}
+                  className="p-1.5 rounded-md bg-neon-green/10 border border-neon-green/30 text-neon-green hover:bg-neon-green/20 transition-all focus:outline-none focus:ring-2 focus:ring-neon-green/40"
+                  title="Copy optimized prompt"
+                  aria-label="Copy optimized prompt"
                 >
-                  {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copied ? 'Copied' : 'Copy'}</span>
+                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                 </button>
               </div>
               <div className="h-[200px] mb-4">

@@ -6,6 +6,7 @@ import {
   clearStoredGuestClaimTokens,
   claimGuestProgress,
 } from './api';
+import { useCO2Store } from './store';
 
 async function syncGuestClaims(): Promise<void> {
   const tokens = getStoredGuestClaimTokens();
@@ -146,6 +147,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({ user: data.user, status: 'authed' });
         await syncGuestClaims();
         await get().refreshProfile();
+        await useCO2Store.getState().refreshGardenData(true);
       }
 
       return {
@@ -207,6 +209,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (userData.user) {
         await syncGuestClaims();
         await get().refreshProfile();
+        await useCO2Store.getState().refreshGardenData(true);
         subscribeToProfileChanges(userData.user.id, (updatedProfile) => {
           set({ profile: updatedProfile });
         });
@@ -224,6 +227,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       profileRealtimeChannel = null;
     }
     await supabase.auth.signOut();
+    useCO2Store.getState().resetGardenData();
     set({
       user: null,
       profile: null,
@@ -288,6 +292,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (initialUser) {
         set({ user: initialUser, status: 'authed' });
         await get().refreshProfile();
+        await useCO2Store.getState().refreshGardenData(true);
 
         subscribeToProfileChanges(initialUser.id, (updatedProfile) => {
           set({ profile: updatedProfile });
@@ -317,6 +322,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               await syncGuestClaims();
             }
             await get().refreshProfile();
+            await useCO2Store.getState().refreshGardenData(true);
             subscribeToProfileChanges(currentUser.id, (updatedProfile) => {
               set({ profile: updatedProfile });
             });
@@ -326,6 +332,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             supabase.removeChannel(profileRealtimeChannel);
             profileRealtimeChannel = null;
           }
+          useCO2Store.getState().resetGardenData();
           set({ user: null, profile: null, status: 'anon' });
         } else if (event === 'PASSWORD_RECOVERY') {
           set({ isAuthModalOpen: true, authModalTab: 'reset-password' });

@@ -1,10 +1,12 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { Beaker, Swords, TreePine, Trophy } from 'lucide-react'
 import { UserChip } from '@/components/auth/user-chip'
-import { getGlobalStats, type GlobalStats } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth-store'
+import { useCO2Store } from '@/lib/store'
+import { formatGrams } from '@/lib/format'
 
 interface NavigationProps {
   currentScreen: number
@@ -19,41 +21,37 @@ const screens = [
 ]
 
 export function Navigation({ currentScreen, onNavigate }: NavigationProps) {
-  const [stats, setStats] = useState<GlobalStats | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [hasError, setHasError] = useState(false)
+  const { user } = useAuthStore()
+  const {
+    gardenRecords,
+    loadingGarden,
+    gardenError,
+    totalCO2Saved,
+    sessionTrees,
+    refreshGardenData,
+  } = useCO2Store()
 
   useEffect(() => {
-    let isMounted = true
+    refreshGardenData(!!user)
+  }, [user, refreshGardenData])
 
-    const fetchStats = async () => {
-      try {
-        const data = await getGlobalStats()
-        if (isMounted) {
-          setStats(data)
-          setHasError(false)
-        }
-      } catch {
-        if (isMounted) {
-          setHasError(true)
-        }
-      } finally {
-        if (isMounted) {
-          setIsLoading(false)
-        }
-      }
-    }
+  // Derive per-user stats:
+  // For signed-in user: exactly matches My Garden's "Trees Planted" and "CO2 Captured"
+  // For anonymous user: shows session values (0 g | 0 trees if none)
+  const treesCount = user
+    ? gardenRecords.filter((r) => r.co2_saved > 0).slice(-60).length
+    : sessionTrees
 
-    fetchStats()
+  const co2SavedValue = user
+    ? gardenRecords
+        .filter((r) => r.co2_saved > 0)
+        .slice(-60)
+        .reduce((sum, r) => sum + r.co2_saved, 0)
+    : totalCO2Saved
 
-    // Refresh every 60 seconds
-    const interval = setInterval(fetchStats, 60000)
-
-    return () => {
-      isMounted = false
-      clearInterval(interval)
-    }
-  }, [])
+  // Fail silently to 0 values on error
+  const displayCO2 = gardenError ? 0 : co2SavedValue
+  const displayTrees = gardenError ? 0 : treesCount
 
   return (
     <motion.nav
@@ -112,22 +110,17 @@ export function Navigation({ currentScreen, onNavigate }: NavigationProps) {
         <div className="flex items-center gap-2 px-1 sm:px-2">
           <UserChip />
           <div className="hidden md:flex items-center gap-1.5 pl-2 border-l border-glass-border">
-            {isLoading && !stats ? (
+            {loadingGarden && user ? (
               <div className="flex items-center gap-1.5 animate-pulse">
                 <div className="w-2 h-2 rounded-full bg-glass-border" />
                 <div className="w-24 h-3 bg-white/10 rounded" />
               </div>
-            ) : stats && !hasError ? (
-              <>
-                <div className="w-2 h-2 rounded-full bg-neon-green animate-pulse" />
-                <span className="text-[10px] font-mono text-muted-foreground whitespace-nowrap">
-                  {((stats.total_co2_saved || 0) / 1000).toFixed(1)} kg CO2 saved | {Math.round(stats.trees_equivalent || 0)} trees
-                </span>
-              </>
             ) : (
               <>
                 <div className="w-2 h-2 rounded-full bg-neon-green animate-pulse" />
-                <span className="text-[10px] font-mono text-muted-foreground">Online</span>
+                <span className="text-[10px] font-mono text-muted-foreground whitespace-nowrap">
+                  {formatGrams(displayCO2)} g CO2 saved | {displayTrees} trees
+                </span>
               </>
             )}
           </div>

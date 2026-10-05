@@ -7,6 +7,7 @@ import { motion } from 'framer-motion'
 import { toast } from 'sonner'
 import { ArenaScene } from '@/components/three/arena-scene'
 import { useAuthStore } from '@/lib/auth-store'
+import { useCO2Store } from '@/lib/store'
 import {
   submitChallenge,
   getDailyChallenge,
@@ -58,8 +59,9 @@ export function Arena({ onNavigate: _onNavigate }: ArenaProps) {
     try {
       const res = await submitChallenge({ challengeId: activeChallenge.id, code })
       toast.success(`Solution Evaluated! Score: ${res.score}/100 (Rank #${res.rank})`)
-      // Refresh leaderboard after submission
+      // Refresh leaderboard and garden stats after submission
       getLeaderboard().then((entries) => setLiveLeaderboard(entries))
+      useCO2Store.getState().refreshGardenData(true)
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         openAuthModal('login', 'Session expired. Please log in again.')

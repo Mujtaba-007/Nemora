@@ -85,7 +85,6 @@ export async function optimizePrompt(params: OptimizeParams): Promise<OptimizeRe
   });
 
   if (error) {
-    // Check if error response context has status 429
     let status = 500;
     let message = error.message || 'Failed to optimize prompt.';
     let retryAfter: number | undefined;
@@ -97,11 +96,22 @@ export async function optimizePrompt(params: OptimizeParams): Promise<OptimizeRe
       if (retryHeader) {
         retryAfter = parseInt(retryHeader, 10);
       }
+
+      // Read JSON error body from Edge Function response
+      try {
+        const bodySource = typeof resp.clone === 'function' ? resp.clone() : resp;
+        const errBody = await bodySource.json();
+        if (errBody && typeof errBody === 'object' && errBody.error) {
+          message = String(errBody.error);
+        }
+      } catch {
+        // Fall back to default error message if body is not JSON
+      }
     }
 
     if (status === 429 || message.toLowerCase().includes('rate limit')) {
       throw new ApiError(
-        message || 'Rate limit reached (10 optimizations / minute). Please slow down and try again shortly.',
+        message,
         429,
         retryAfter || 60
       );

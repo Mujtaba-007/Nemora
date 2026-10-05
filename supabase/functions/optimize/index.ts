@@ -4,6 +4,7 @@ import { estimateTokens, estimateCO2, formatCO2 } from '../_shared/co2.ts';
 import { getSupabaseAdmin, getSupabaseUserClient } from '../_shared/supabaseAdmin.ts';
 import { checkRateLimit } from '../_shared/rateLimiter.ts';
 import { signClaimToken } from '../_shared/claims.ts';
+import { MAX_PROMPT_WORDS, countWords } from '../_shared/limits.ts';
 import type { OptimizeRequest, OptimizeResponse, Strategy } from '../_shared/types.ts';
 
 const MAX_PROMPT_LENGTH = 4000;
@@ -82,6 +83,19 @@ serve(async (req: Request) => {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
+    }
+
+    if (countWords(rawPrompt) > MAX_PROMPT_WORDS) {
+      return new Response(
+        JSON.stringify({
+          error: `Prompt is too long. Please keep it to ${MAX_PROMPT_WORDS} words or fewer.`,
+          code: 'PROMPT_TOO_LONG',
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
     }
 
     if (rawPrompt.length > MAX_PROMPT_LENGTH) {
@@ -173,19 +187,43 @@ serve(async (req: Request) => {
       });
       clearTimeout(timeout);
 
-      if (groqResponse.status === 429) {
-        return new Response(JSON.stringify({ error: 'Rate limited by AI provider. Please try again later.' }), {
-          status: 429,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
       if (!groqResponse.ok) {
         const errText = await groqResponse.text();
-        console.error('Groq error:', groqResponse.status, errText);
-        return new Response(JSON.stringify({ error: 'AI optimization failed. Please try again later.' }), {
-          status: 502,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+        console.error('Groq upstream error:', groqResponse.status, errText);
+
+        if (groqResponse.status === 429) {
+          return new Response(
+            JSON.stringify({
+              error: 'The AI service is busy. Please wait a minute and try again.',
+              code: 'RATE_LIMITED',
+            }),
+            {
+              status: 429,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            }
+          );
+        }
+
+        if (groqResponse.status === 413) {
+          return new Response(
+            JSON.stringify({
+              error: 'Prompt is too large for the AI service. Please shorten it.',
+              code: 'PROMPT_TOO_LARGE',
+            }),
+            {
+              status: 413,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ error: 'AI optimization failed. Please try again later.' }),
+          {
+            status: 502,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          }
+        );
       }
 
       const aiData = await groqResponse.json();

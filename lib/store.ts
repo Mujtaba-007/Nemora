@@ -6,6 +6,7 @@ import {
   CO2_RATING_THRESHOLDS,
   getCO2Rating,
 } from './co2';
+import { getGardenDaily, type GardenDailyRecord } from './api';
 
 // Re-export for any legacy imports
 export { estimateTokens, estimateCO2, formatCO2, CO2_RATING_THRESHOLDS, getCO2Rating };
@@ -17,6 +18,10 @@ interface CO2State {
   totalCO2Saved: number;
   co2History: { date: string; saved: number }[];
   gardenStats: { treeId: number; co2Saved: number; plantedDate: string }[];
+  gardenRecords: GardenDailyRecord[];
+  loadingGarden: boolean;
+  gardenError: boolean;
+  sessionTrees: number;
   leaderboard: { rank: number; name: string; score: number; co2Saved: number }[];
   dailyChallenge: {
     id?: string;
@@ -34,7 +39,11 @@ interface CO2State {
   updateDailyChallengeCode: (code: string) => void;
   setDraftPrompt: (prompt: string) => void;
   setActiveScreen: (idx: number) => void;
+  refreshGardenData: (isAuthed: boolean) => Promise<void>;
+  resetGardenData: () => void;
 }
+
+let inFlightGardenPromise: Promise<GardenDailyRecord[]> | null = null;
 
 export const useCO2Store = create<CO2State>((set, get) => ({
   currentPrompt: '',
@@ -42,6 +51,10 @@ export const useCO2Store = create<CO2State>((set, get) => ({
   totalCO2Saved: 0,
   co2History: [],
   gardenStats: [],
+  gardenRecords: [],
+  loadingGarden: false,
+  gardenError: false,
+  sessionTrees: 0,
   leaderboard: [],
   dailyChallenge: {
     title: 'Optimize API Calls',
@@ -74,7 +87,10 @@ async function fetchData(ids) {
   },
   addCO2Saved: (amount: number) => {
     const current = get().totalCO2Saved;
-    set({ totalCO2Saved: formatCO2(current + amount) });
+    set({
+      totalCO2Saved: formatCO2(current + amount),
+      sessionTrees: amount > 0 ? get().sessionTrees + 1 : get().sessionTrees,
+    });
   },
   setTotalCO2Saved: (amount: number) => {
     set({ totalCO2Saved: formatCO2(amount) });
@@ -84,6 +100,40 @@ async function fetchData(ids) {
   },
   setActiveScreen: (idx: number) => {
     set({ activeScreen: idx });
+  },
+  refreshGardenData: async (isAuthed: boolean) => {
+    if (!isAuthed) {
+      set({ gardenRecords: [], loadingGarden: false, gardenError: false });
+      return;
+    }
+    if (inFlightGardenPromise) {
+      await inFlightGardenPromise;
+      return;
+    }
+    set({ loadingGarden: true, gardenError: false });
+    inFlightGardenPromise = getGardenDaily()
+      .then((records) => {
+        set({ gardenRecords: records, loadingGarden: false, gardenError: false });
+        return records;
+      })
+      .catch((err) => {
+        console.warn('Failed to fetch garden daily records:', err);
+        set({ gardenError: true, loadingGarden: false });
+        return [];
+      })
+      .finally(() => {
+        inFlightGardenPromise = null;
+      });
+    await inFlightGardenPromise;
+  },
+  resetGardenData: () => {
+    set({
+      gardenRecords: [],
+      sessionTrees: 0,
+      totalCO2Saved: 0,
+      loadingGarden: false,
+      gardenError: false,
+    });
   },
   updateDailyChallengeCode: (code: string) => {
     let score = 45;

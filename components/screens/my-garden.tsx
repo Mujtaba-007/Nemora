@@ -1,13 +1,12 @@
 'use client'
 
-import { Suspense, useEffect, useState, useMemo } from 'react'
+import { Suspense, useEffect, useMemo } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Environment } from '@react-three/drei'
 import { motion } from 'framer-motion'
 import { GardenScene } from '@/components/three/garden-scene'
 import { useCO2Store } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
-import { getGardenDaily, type GardenDailyRecord } from '@/lib/api'
 
 interface LiveTree {
   treeId: number
@@ -16,23 +15,17 @@ interface LiveTree {
 }
 
 export function MyGarden({ onNavigate: _onNavigate }: { onNavigate?: (screen: number) => void }) {
-  const { totalCO2Saved } = useCO2Store()
+  const { totalCO2Saved, gardenRecords, loadingGarden, refreshGardenData } = useCO2Store()
   const { user, profile, openAuthModal } = useAuthStore()
-
-  const [liveRecords, setLiveRecords] = useState<GardenDailyRecord[]>([])
-  const [loadingGarden, setLoadingGarden] = useState(false)
 
   useEffect(() => {
     if (!user) return
-    setLoadingGarden(true)
-    getGardenDaily()
-      .then((records) => setLiveRecords(records))
-      .finally(() => setLoadingGarden(false))
-  }, [user])
+    refreshGardenData(true)
+  }, [user, refreshGardenData])
 
   // Derive live trees from daily records (one tree per record with co2_saved > 0), capped at 60 for performance
   const liveTrees: LiveTree[] = useMemo(() => {
-    return liveRecords
+    return gardenRecords
       .filter((r) => r.co2_saved > 0)
       .slice(-60)
       .map((r, index) => ({
@@ -40,7 +33,7 @@ export function MyGarden({ onNavigate: _onNavigate }: { onNavigate?: (screen: nu
         co2Saved: r.co2_saved,
         plantedDate: r.day,
       }))
-  }, [liveRecords])
+  }, [gardenRecords])
 
   // Build 7-day bar chart from the last 7 days, with empty bars and 0g for days with no activity
   const last7Days = useMemo(() => {
@@ -56,7 +49,7 @@ export function MyGarden({ onNavigate: _onNavigate }: { onNavigate?: (screen: nu
       const fullDate = `${year}-${month}-${dayNum}`
       const weekday = d.toLocaleDateString('en-US', { weekday: 'short' })
 
-      const match = liveRecords.find((r) => r.day.startsWith(fullDate))
+      const match = gardenRecords.find((r) => r.day.startsWith(fullDate))
       days.push({
         date: weekday,
         fullDate,
@@ -64,7 +57,7 @@ export function MyGarden({ onNavigate: _onNavigate }: { onNavigate?: (screen: nu
       })
     }
     return days
-  }, [liveRecords])
+  }, [gardenRecords])
 
   const displayTrees = user ? liveTrees : []
   const displayHistory = user ? last7Days : []

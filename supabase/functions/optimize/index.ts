@@ -165,7 +165,7 @@ serve(async (req: Request) => {
     let optimizedText = '';
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 45000);
     try {
       const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -180,7 +180,7 @@ serve(async (req: Request) => {
             { role: 'user', content: rawPrompt },
           ],
           temperature: 0.2,
-          max_completion_tokens: 2048,
+          max_completion_tokens: 6000, // Updated limit for 1000-word prompts
           reasoning_effort: 'low',
         }),
         signal: controller.signal,
@@ -227,6 +227,19 @@ serve(async (req: Request) => {
       }
 
       const aiData = await groqResponse.json();
+      const finishReason = aiData.choices?.[0]?.finish_reason;
+      if (finishReason === 'length') {
+        return new Response(
+          JSON.stringify({
+            error: 'The result was too long to generate. Please shorten your prompt.',
+            code: 'RESULT_TOO_LONG',
+          }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          }
+        );
+      }
       const rawContent: string = aiData.choices?.[0]?.message?.content ?? '';
       if (!rawContent.trim()) {
         // Log the full response body to aid debugging when reasoning models return empty/null content

@@ -22,6 +22,8 @@ export interface OptimizeResult {
   reduction_pct: number;
   coins_awarded: number;
   persisted: boolean;
+  awarded: boolean;
+  reason: string | null;
   claim_token?: string;
 }
 

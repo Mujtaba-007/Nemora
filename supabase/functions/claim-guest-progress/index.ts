@@ -2,12 +2,17 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { getCorsHeaders, handleCorsPreflight } from '../_shared/cors.ts';
 import { getSupabaseAdmin, getSupabaseUserClient } from '../_shared/supabaseAdmin.ts';
 import { verifyClaimToken, type GuestClaimPayload } from '../_shared/claims.ts';
+import { estimateTokens, estimateCO2, formatCO2 } from '../_shared/co2.ts';
+import {
+  MAX_REWARDED_OPTIMIZATIONS_PER_DAY,
+  MAX_COINS_PER_DAY,
+} from '../_shared/limits.ts';
 import type { ClaimGuestProgressRequest, ClaimGuestProgressResponse } from '../_shared/types.ts';
 
-// Limits to prevent economy inflation
+// Per-account caps that prevent economy inflation via guest claim abuse
 const MAX_GUEST_CLAIMS_PER_USER = 10;
-const MAX_GUEST_COINS_PER_USER = 500;
-const MAX_TOKEN_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_GUEST_COINS_PER_USER  = 500;
+const MAX_TOKEN_AGE_MS          = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 serve(async (req: Request) => {
   // 1. CORS Preflight
@@ -29,23 +34,16 @@ serve(async (req: Request) => {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return new Response(
         JSON.stringify({ error: 'Authentication required to claim guest progress.' }),
-        {
-          status: 401,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
     const userClient = getSupabaseUserClient(authHeader);
     const { data: userData, error: userError } = await userClient.auth.getUser();
-
     if (userError || !userData?.user) {
       return new Response(
         JSON.stringify({ error: 'Invalid or expired session. Please log in again.' }),
-        {
-          status: 401,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
@@ -71,19 +69,16 @@ serve(async (req: Request) => {
 
     const secret = Deno.env.get('GUEST_CLAIM_SECRET');
     if (!secret) {
-      console.error('GUEST_CLAIM_SECRET is not configured in Supabase environment');
+      console.error('GUEST_CLAIM_SECRET is not configured');
       return new Response(
         JSON.stringify({ error: 'Claim service is temporarily unavailable.' }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
     const admin = getSupabaseAdmin();
 
-    // 4. Check existing claims by this user to enforce per-account caps
+    // 4. Check existing per-account guest-claim caps
     const { data: existingUserClaims, error: claimsErr } = await admin
       .from('guest_claims')
       .select('coins')
@@ -93,29 +88,23 @@ serve(async (req: Request) => {
       console.error('Failed to query existing guest claims:', claimsErr.message);
       return new Response(
         JSON.stringify({ error: 'Database error reading account claims.' }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
-    let userClaimCount = existingUserClaims?.length || 0;
+    let userClaimCount  = existingUserClaims?.length || 0;
     let userClaimedCoins = (existingUserClaims || []).reduce((sum, c) => sum + (c.coins || 0), 0);
 
     if (userClaimCount >= MAX_GUEST_CLAIMS_PER_USER || userClaimedCoins >= MAX_GUEST_COINS_PER_USER) {
       return new Response(
         JSON.stringify({
-          error: `Account has reached the maximum allowed guest claim limit (${MAX_GUEST_CLAIMS_PER_USER} claims / ${MAX_GUEST_COINS_PER_USER} coins).`,
+          error: `Account has reached the maximum guest claim limit (${MAX_GUEST_CLAIMS_PER_USER} claims / ${MAX_GUEST_COINS_PER_USER} coins).`,
         }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
-    // 5. Verify tokens, deduplicate, and enforce caps
+    // 5. Verify tokens, deduplicate within the batch, and enforce account caps
     const seenClaimIds = new Set<string>();
     const validClaims: GuestClaimPayload[] = [];
     const now = Date.now();
@@ -129,25 +118,23 @@ serve(async (req: Request) => {
         continue;
       }
 
-      // Check expiry (7 days) & clock skew (within 1 min into future)
+      // Expiry & clock-skew guard
       if (now - payload.timestamp > MAX_TOKEN_AGE_MS || payload.timestamp > now + 60000) {
         console.warn('Rejected token: expired or invalid timestamp');
         continue;
       }
 
-      // Validate amounts
+      // Must have positive amounts
       if (payload.coins <= 0 || payload.co2_saved <= 0 || payload.tokens_saved < 0) {
         console.warn('Rejected token: invalid non-positive amounts');
         continue;
       }
 
-      // Prevent duplicate in same batch
-      if (seenClaimIds.has(payload.claim_id)) {
-        continue;
-      }
+      // Deduplicate within this request
+      if (seenClaimIds.has(payload.claim_id)) continue;
       seenClaimIds.add(payload.claim_id);
 
-      // Check if claim_id was already claimed in database
+      // Reject already-consumed claim IDs from the database
       const { data: dbClaim } = await admin
         .from('guest_claims')
         .select('claim_id')
@@ -159,12 +146,12 @@ serve(async (req: Request) => {
         continue;
       }
 
-      // Check user caps
+      // Per-account cap check
       if (
         userClaimCount + 1 > MAX_GUEST_CLAIMS_PER_USER ||
         userClaimedCoins + payload.coins > MAX_GUEST_COINS_PER_USER
       ) {
-        console.warn('Account cap reached during batch processing, stopping further additions.');
+        console.warn('Account cap reached during batch, stopping further additions.');
         break;
       }
 
@@ -174,80 +161,83 @@ serve(async (req: Request) => {
     }
 
     if (validClaims.length === 0) {
-      const response: ClaimGuestProgressResponse = {
-        success: true,
-        claims_processed: 0,
-        coins_claimed: 0,
-        co2_claimed: 0,
-        message: 'No valid or unclaimed guest tokens found.',
-      };
-      return new Response(JSON.stringify(response), {
-        status: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      return new Response(
+        JSON.stringify({
+          success: true,
+          claims_processed: 0,
+          coins_claimed: 0,
+          co2_claimed: 0,
+          message: 'No valid or unclaimed guest tokens found.',
+        } as ClaimGuestProgressResponse),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+
+    // 6. For each valid claim, call award_progress_with_hash via service-role client.
+    //    We always record the claim_id as consumed first (via guest_claims insert)
+    //    so that even a rejected duplicate cannot be retried.
+    let totalCoinsClaimed = 0;
+    let totalCO2Claimed   = 0;
+    let claimsProcessed   = 0;
+
+    for (const claim of validClaims) {
+      // Mark as consumed regardless of award outcome (prevents retry loops)
+      const { error: claimInsertErr } = await admin.from('guest_claims').insert({
+        claim_id:     claim.claim_id,
+        user_id:      userId,
+        tokens_saved: claim.tokens_saved,
+        co2_saved:    claim.co2_saved,
+        coins:        claim.coins,
       });
-    }
 
-    // 6. Record claims in database
-    const claimRows = validClaims.map((c) => ({
-      claim_id: c.claim_id,
-      user_id: userId,
-      tokens_saved: c.tokens_saved,
-      co2_saved: c.co2_saved,
-      coins: c.coins,
-    }));
+      if (claimInsertErr) {
+        // Conflict means it was claimed in a concurrent request – skip
+        console.warn('guest_claims insert conflict (duplicate):', claimInsertErr.message);
+        continue;
+      }
 
-    const { error: insertClaimError } = await admin.from('guest_claims').insert(claimRows);
-    if (insertClaimError) {
-      console.error('Failed to insert guest_claims:', insertClaimError.message);
-      return new Response(
-        JSON.stringify({ error: 'Failed to record guest claims.' }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
-    }
+      // Derive original_co2 / optimized_co2 from saved token counts
+      const originalCO2  = estimateCO2(claim.tokens_saved);
+      const optimizedCO2 = Math.max(0, originalCO2 - claim.co2_saved);
 
-    // 7. Log prompt_events so trees and gardens reflect the claimed guest optimizations
-    const promptEventRows = validClaims.map((c) => ({
-      user_id: userId,
-      strategy: 'compress' as const,
-      original_tokens: c.tokens_saved,
-      optimized_tokens: 0,
-      original_co2: c.co2_saved,
-      optimized_co2: 0,
-      co2_saved: c.co2_saved,
-      coins_awarded: c.coins,
-    }));
+      // Use a fallback hash if not present in old tokens (legacy tokens won't have it)
+      const promptHash = claim.prompt_hash ?? claim.claim_id;
 
-    await admin.from('prompt_events').insert(promptEventRows);
+      const { data: rpcData, error: rpcError } = await admin.rpc('award_progress_with_hash', {
+        p_user_id:          userId,
+        p_prompt_hash:      promptHash,
+        p_strategy:         'compress', // guest sessions don't record strategy
+        p_original_tokens:  claim.tokens_saved,
+        p_optimized_tokens: 0,
+        p_original_co2:     originalCO2,
+        p_optimized_co2:    optimizedCO2,
+        p_co2_saved:        claim.co2_saved,
+        p_coins:            claim.coins,
+        p_max_events:       MAX_REWARDED_OPTIMIZATIONS_PER_DAY,
+        p_max_coins:        MAX_COINS_PER_DAY,
+      });
 
-    // 8. Atomically award coins and CO2 progress to profile
-    const totalCO2ToAward = Number(validClaims.reduce((sum, c) => sum + c.co2_saved, 0).toFixed(3));
-    const totalCoinsToAward = validClaims.reduce((sum, c) => sum + c.coins, 0);
+      if (rpcError) {
+        console.error('award_progress_with_hash error during claim:', rpcError.message);
+        // Claim is consumed, but coins not awarded – log and continue
+        continue;
+      }
 
-    const { error: awardError } = await admin.rpc('award_progress', {
-      p_user_id: userId,
-      p_co2_saved: totalCO2ToAward,
-      p_coins: totalCoinsToAward,
-    });
-
-    if (awardError) {
-      console.error('Failed to award progress after recording guest claims:', awardError.message);
-      return new Response(
-        JSON.stringify({ error: 'Claims recorded, but failed to credit profile balance.' }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
+      const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+      if (row?.awarded) {
+        totalCoinsClaimed += claim.coins;
+        totalCO2Claimed   += claim.co2_saved;
+        claimsProcessed++;
+      } else {
+        console.log(`Claim ${claim.claim_id} consumed but not awarded: ${row?.reason}`);
+      }
     }
 
     const response: ClaimGuestProgressResponse = {
-      success: true,
-      claims_processed: validClaims.length,
-      coins_claimed: totalCoinsToAward,
-      co2_claimed: totalCO2ToAward,
+      success:          true,
+      claims_processed: claimsProcessed,
+      coins_claimed:    totalCoinsClaimed,
+      co2_claimed:      Number(totalCO2Claimed.toFixed(3)),
     };
 
     return new Response(JSON.stringify(response), {
@@ -258,10 +248,7 @@ serve(async (req: Request) => {
     console.error('Unhandled claim-guest-progress error:', err);
     return new Response(
       JSON.stringify({ error: 'Internal server error processing guest claims.' }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      }
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   }
 });

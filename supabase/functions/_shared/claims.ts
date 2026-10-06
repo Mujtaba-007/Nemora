@@ -4,6 +4,7 @@ export interface GuestClaimPayload {
   co2_saved: number;
   coins: number;
   timestamp: number;
+  prompt_hash?: string;
 }
 
 function base64UrlEncode(str: string): string {

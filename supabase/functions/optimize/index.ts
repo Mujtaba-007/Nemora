@@ -4,16 +4,17 @@ import { estimateTokens, estimateCO2, formatCO2 } from '../_shared/co2.ts';
 import { getSupabaseAdmin, getSupabaseUserClient } from '../_shared/supabaseAdmin.ts';
 import { checkRateLimit } from '../_shared/rateLimiter.ts';
 import { signClaimToken } from '../_shared/claims.ts';
-import { MAX_PROMPT_WORDS, countWords } from '../_shared/limits.ts';
+import {
+  MAX_PROMPT_CHARS,
+  MAX_REWARDED_OPTIMIZATIONS_PER_DAY,
+  MAX_COINS_PER_DAY,
+} from '../_shared/limits.ts';
 import type { OptimizeRequest, OptimizeResponse, Strategy } from '../_shared/types.ts';
 
-const MAX_PROMPT_LENGTH = 4000;
-const DEFAULT_MODEL = 'google/gemini-2.0-flash-001';
+// ---------------------------------------------------------------------------
+// Strategy system prompts (unchanged)
+// ---------------------------------------------------------------------------
 
-// Common preamble applied to every strategy.
-// Rules: rewrite prompts only; never answer or execute them; do not add information
-// not present in the original; keep the original language; output ONLY the rewritten
-// prompt with no preamble, commentary, or code fences.
 const STRATEGY_PREAMBLE =
   'You rewrite prompts. You never answer or execute them. ' +
   'Do not add any information that is not in the original. ' +
@@ -43,6 +44,27 @@ const SYSTEM_PROMPTS: Record<Strategy, string> = {
 
 const VALID_STRATEGIES = new Set<Strategy>(['compress', 'facts-only', 'bullets']);
 
+// ---------------------------------------------------------------------------
+// HMAC-SHA256 helper – produces a lowercase hex digest
+// ---------------------------------------------------------------------------
+async function hmacSha256Hex(message: string, secret: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+// ---------------------------------------------------------------------------
+// Request handler
+// ---------------------------------------------------------------------------
 serve(async (req: Request) => {
   // 1. Handle CORS preflight
   const preflight = handleCorsPreflight(req);
@@ -62,20 +84,19 @@ serve(async (req: Request) => {
     const body: OptimizeRequest = await req.json().catch(() => ({ prompt: '' }));
     const rawPrompt = (body.prompt || '').trim();
 
-    // Strategy validation: missing → default to 'compress'; present but invalid → 400.
+    // Strategy validation
     let strategy: Strategy;
     if (!body.strategy) {
       strategy = 'compress';
     } else if (!VALID_STRATEGIES.has(body.strategy as Strategy)) {
       return new Response(
         JSON.stringify({ error: `Invalid strategy '${body.strategy}'. Must be one of: compress, facts-only, bullets.` }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     } else {
       strategy = body.strategy as Strategy;
     }
 
-    // Log strategy name only — never the prompt text.
     console.log(`optimize: strategy=${strategy}`);
 
     if (!rawPrompt) {
@@ -85,30 +106,28 @@ serve(async (req: Request) => {
       });
     }
 
-    if (countWords(rawPrompt) > MAX_PROMPT_WORDS) {
+    // 3. Character limit check (must happen before any AI call or rate-limit)
+    if (rawPrompt.length > MAX_PROMPT_CHARS) {
       return new Response(
         JSON.stringify({
-          error: `Prompt is too long. Please keep it to ${MAX_PROMPT_WORDS} words or fewer.`,
+          error: 'Prompt is too long. Please keep it to 4,000 characters or fewer.',
           code: 'PROMPT_TOO_LONG',
         }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
-    if (rawPrompt.length > MAX_PROMPT_LENGTH) {
+    // 4. Read secrets INSIDE the handler (never at module level)
+    const promptHashSecret = Deno.env.get('PROMPT_HASH_SECRET');
+    if (!promptHashSecret) {
+      console.error('PROMPT_HASH_SECRET is not configured');
       return new Response(
-        JSON.stringify({ error: `Prompt exceeds maximum allowed length of ${MAX_PROMPT_LENGTH} characters.` }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+        JSON.stringify({ error: 'Reward service is not configured.' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
-    // 3. Optional Authentication: extract user if valid JWT is provided
+    // 5. Optional auth: extract user if a valid JWT was sent
     const authHeader = req.headers.get('Authorization');
     let user: { id: string } | null = null;
 
@@ -124,7 +143,7 @@ serve(async (req: Request) => {
       }
     }
 
-    // 4. Rate Limiting: 10 requests / minute per user ID or client IP
+    // 6. Per-minute rate limit (10 req/min per user or IP)
     const clientIp =
       req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
       req.headers.get('cf-connecting-ip') ||
@@ -144,11 +163,11 @@ serve(async (req: Request) => {
             'Content-Type': 'application/json',
             'Retry-After': String(limitResult.retryAfterSeconds),
           },
-        }
+        },
       );
     }
 
-// 5. Groq Configuration
+    // 7. Groq API key
     const apiKey = Deno.env.get('GROQ_API_KEY');
     if (!apiKey) {
       console.error('GROQ_API_KEY is missing');
@@ -160,8 +179,7 @@ serve(async (req: Request) => {
 
     const model = Deno.env.get('GROQ_MODEL') || 'openai/gpt-oss-120b';
 
-    // 6. Call Groq API (OpenAI‑compatible)
-    // Hoisted to outer scope so every use below (metrics, response) can see it.
+    // 8. Call Groq
     let optimizedText = '';
 
     const controller = new AbortController();
@@ -180,7 +198,7 @@ serve(async (req: Request) => {
             { role: 'user', content: rawPrompt },
           ],
           temperature: 0.2,
-          max_completion_tokens: 6000, // Updated limit for 1000-word prompts
+          max_completion_tokens: 3000,
           reasoning_effort: 'low',
         }),
         signal: controller.signal,
@@ -193,36 +211,19 @@ serve(async (req: Request) => {
 
         if (groqResponse.status === 429) {
           return new Response(
-            JSON.stringify({
-              error: 'The AI service is busy. Please wait a minute and try again.',
-              code: 'RATE_LIMITED',
-            }),
-            {
-              status: 429,
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-            }
+            JSON.stringify({ error: 'The AI service is busy. Please wait a minute and try again.', code: 'RATE_LIMITED' }),
+            { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
           );
         }
-
         if (groqResponse.status === 413) {
           return new Response(
-            JSON.stringify({
-              error: 'Prompt is too large for the AI service. Please shorten it.',
-              code: 'PROMPT_TOO_LARGE',
-            }),
-            {
-              status: 413,
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-            }
+            JSON.stringify({ error: 'Prompt is too large for the AI service. Please shorten it.', code: 'PROMPT_TOO_LARGE' }),
+            { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
           );
         }
-
         return new Response(
           JSON.stringify({ error: 'AI optimization failed. Please try again later.' }),
-          {
-            status: 502,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          }
+          { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
         );
       }
 
@@ -230,36 +231,28 @@ serve(async (req: Request) => {
       const finishReason = aiData.choices?.[0]?.finish_reason;
       if (finishReason === 'length') {
         return new Response(
-          JSON.stringify({
-            error: 'The result was too long to generate. Please shorten your prompt.',
-            code: 'RESULT_TOO_LONG',
-          }),
-          {
-            status: 400,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          }
+          JSON.stringify({ error: 'The result was too long to generate. Please shorten your prompt.', code: 'RESULT_TOO_LONG' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
         );
       }
+
       const rawContent: string = aiData.choices?.[0]?.message?.content ?? '';
       if (!rawContent.trim()) {
-        // Log the full response body to aid debugging when reasoning models return empty/null content
-        console.error(
-          'Groq returned empty message.content. Full response:',
-          JSON.stringify(aiData)
-        );
+        console.error('Groq returned empty message.content. Full response:', JSON.stringify(aiData));
         return new Response(JSON.stringify({ error: 'AI returned empty output.' }), {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
-      // Strip any <think>...</think> reasoning traces the model may include
+
+      // Strip any <think>...</think> reasoning traces
       optimizedText = rawContent.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
       if (!optimizedText) {
         console.error('optimizedText was empty after stripping think tags. rawContent:', rawContent);
-        return new Response(JSON.stringify({ error: 'AI returned only reasoning trace with no output.' }), {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+        return new Response(
+          JSON.stringify({ error: 'AI returned only reasoning trace with no output.' }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
       }
     } catch (e) {
       clearTimeout(timeout);
@@ -277,8 +270,6 @@ serve(async (req: Request) => {
       });
     }
 
-    // Belt-and-suspenders guard: should never reach here empty, but prevents any
-    // downstream ReferenceError or stale empty-string from awarding coins.
     if (!optimizedText) {
       return new Response(JSON.stringify({ error: 'Model returned an empty response. Please retry.' }), {
         status: 500,
@@ -286,106 +277,117 @@ serve(async (req: Request) => {
       });
     }
 
-    // 7. Calculate tokens and carbon metrics
+    // 9. Calculate metrics
     const originalTokens = estimateTokens(rawPrompt);
     const originalCO2 = estimateCO2(originalTokens);
-
     const optimizedTokens = estimateTokens(optimizedText);
     const optimizedCO2 = estimateCO2(optimizedTokens);
 
-    // If optimized version is not shorter, no savings are awarded
     let savings = 0;
     let coinsAwarded = 0;
-
     if (optimizedTokens < originalTokens && originalCO2 > optimizedCO2) {
       savings = formatCO2(originalCO2 - optimizedCO2);
-      // Eco-coin reward rule: 1 coin per 0.001g CO2 saved
       coinsAwarded = Math.floor(savings / 0.001);
     }
 
     const reductionPct =
-      originalCO2 > 0 && savings > 0 ? Math.min(100, Math.round((savings / originalCO2) * 100)) : 0;
+      originalCO2 > 0 && savings > 0
+        ? Math.min(100, Math.round((savings / originalCO2) * 100))
+        : 0;
+
+    // 10. Compute HMAC of normalised prompt (strategy NOT included → switching
+    //     strategy on the same prompt cannot earn a second reward today)
+    const normalizedPrompt = rawPrompt.toLowerCase().replace(/\s+/g, ' ');
+    const promptHash = await hmacSha256Hex(normalizedPrompt, promptHashSecret);
 
     let persisted = false;
+    let awarded = false;
+    let awardReason: string | null = null;
 
-    // 8. If authenticated user, record event & credit profile
-    if (user && savings > 0) {
-      try {
-        const admin = getSupabaseAdmin();
-
-        // Audit log insert (privacy-first: no prompt text)
-        const { error: eventError } = await admin.from('prompt_events').insert({
-          user_id: user.id,
-          strategy,
-          original_tokens: originalTokens,
-          optimized_tokens: optimizedTokens,
-          original_co2: originalCO2,
-          optimized_co2: optimizedCO2,
-          co2_saved: savings,
-          coins_awarded: coinsAwarded,
-        });
-
-        if (eventError) {
-          console.error('Failed to log prompt event:', eventError.message);
-        } else {
-          // Atomically award coins and CO2 saved to user's profile
-          const { error: awardError } = await admin.rpc('award_progress', {
-            p_user_id: user.id,
-            p_co2_saved: savings,
-            p_coins: coinsAwarded,
+    // 11. Authenticated user flow
+    if (user) {
+      if (savings > 0) {
+        try {
+          const admin = getSupabaseAdmin();
+          const { data: rpcData, error: rpcError } = await admin.rpc('award_progress_with_hash', {
+            p_user_id:          user.id,
+            p_prompt_hash:      promptHash,
+            p_strategy:         strategy,
+            p_original_tokens:  originalTokens,
+            p_optimized_tokens: optimizedTokens,
+            p_original_co2:     originalCO2,
+            p_optimized_co2:    optimizedCO2,
+            p_co2_saved:        savings,
+            p_coins:            coinsAwarded,
+            p_max_events:       MAX_REWARDED_OPTIMIZATIONS_PER_DAY,
+            p_max_coins:        MAX_COINS_PER_DAY,
           });
 
-          if (awardError) {
-            console.error('Failed to award user progress:', awardError.message);
+          if (rpcError) {
+            // Fail closed: log the error, return optimised text, zero coins
+            console.error('award_progress_with_hash RPC error:', rpcError);
+            awardReason = 'REWARD_ERROR';
           } else {
-            persisted = true;
+            // supabase-js returns an array for table-returning RPCs
+            const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+            awarded = row?.awarded === true;
+            awardReason = row?.reason ?? null;
+            if (awarded) {
+              persisted = true;
+              await admin.rpc('refresh_profile_noop').catch(() => {}); // best-effort
+            }
           }
-        }
-      } catch (dbErr) {
-        console.error('Database write error during award_progress:', dbErr);
-      }
-    }
-
-    // 9. If unauthenticated guest with savings, generate HMAC-signed claim token
-    let claimToken: string | undefined;
-    if (!user && savings > 0) {
-      const claimSecret = Deno.env.get('GUEST_CLAIM_SECRET');
-      if (claimSecret) {
-        try {
-          claimToken = await signClaimToken(
-            {
-              claim_id: crypto.randomUUID(),
-              tokens_saved: Math.max(0, originalTokens - optimizedTokens),
-              co2_saved: savings,
-              coins: coinsAwarded,
-              timestamp: Date.now(),
-            },
-            claimSecret
-          );
-        } catch (signErr) {
-          console.error('Failed to sign guest claim token:', signErr);
+        } catch (dbErr) {
+          console.error('DB error during award_progress_with_hash:', dbErr);
+          awardReason = 'REWARD_ERROR';
         }
       } else {
-        console.warn('GUEST_CLAIM_SECRET is not configured; guest claim tokens disabled.');
+        // savings === 0 → NO_SAVINGS
+        awardReason = 'NO_SAVINGS';
       }
     }
 
+    // 12. Guest flow – do NOT call the RPC; sign a claim token if there are savings
+    let claimToken: string | undefined;
+    if (!user) {
+      if (savings > 0) {
+        awarded = true; // indicate to frontend that coins would have been earned
+        const claimSecret = Deno.env.get('GUEST_CLAIM_SECRET');
+        if (claimSecret) {
+          try {
+            claimToken = await signClaimToken(
+              {
+                claim_id:     crypto.randomUUID(),
+                tokens_saved: Math.max(0, originalTokens - optimizedTokens),
+                co2_saved:    savings,
+                coins:        coinsAwarded,
+                timestamp:    Date.now(),
+                prompt_hash:  promptHash,
+              },
+              claimSecret,
+            );
+          } catch (signErr) {
+            console.error('Failed to sign guest claim token:', signErr);
+          }
+        } else {
+          console.warn('GUEST_CLAIM_SECRET not configured; guest claim tokens disabled.');
+        }
+      } else {
+        awardReason = 'NO_SAVINGS';
+      }
+    }
+
+    // 13. Build response – zero coins & persisted=false whenever not awarded
     const responsePayload: OptimizeResponse = {
       strategy,
-      original: {
-        text: rawPrompt,
-        tokens: originalTokens,
-        co2: originalCO2,
-      },
-      optimized: {
-        text: optimizedText,
-        tokens: optimizedTokens,
-        co2: optimizedCO2,
-      },
+      original:  { text: rawPrompt,      tokens: originalTokens,  co2: originalCO2 },
+      optimized: { text: optimizedText,  tokens: optimizedTokens, co2: optimizedCO2 },
       savings,
       reduction_pct: reductionPct,
-      coins_awarded: coinsAwarded,
+      coins_awarded: awarded ? coinsAwarded : 0,
       persisted,
+      awarded,
+      reason: awardReason,
       claim_token: claimToken,
     };
 
@@ -395,9 +397,9 @@ serve(async (req: Request) => {
     });
   } catch (err) {
     console.error('Unhandled optimize Edge Function error:', err);
-    return new Response(JSON.stringify({ error: 'Internal server error processing prompt optimization.' }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+    return new Response(
+      JSON.stringify({ error: 'Internal server error processing prompt optimization.' }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
   }
 });

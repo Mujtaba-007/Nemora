@@ -11,7 +11,15 @@ import { CrystalOrb } from '@/components/three/crystal-orb'
 import { useCO2Store } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import { optimizePrompt, saveGuestClaimToken, ApiError, type OptimizeResult } from '@/lib/api'
-import { MAX_PROMPT_WORDS, countWords } from '@/lib/limits'
+import { MAX_PROMPT_CHARS } from '@/lib/limits'
+
+// Human-readable messages for each non-award reason
+const REASON_MESSAGES: Record<string, string> = {
+  DUPLICATE_PROMPT:  'Already optimized recently. No coins awarded.',
+  DAILY_CAP_REACHED: 'Daily reward limit reached. Come back tomorrow.',
+  NO_SAVINGS:        'No savings found for this prompt, so no reward.',
+  REWARD_ERROR:      'Rewards are temporarily unavailable.',
+}
 
 export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen: number) => void }) {
   const { addCO2Saved, currentPrompt, draftPrompt, setDraftPrompt, refreshGardenData } = useCO2Store()
@@ -22,7 +30,8 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
   const [result, setResult] = useState<OptimizeResult | null>(null)
   const [copied, setCopied] = useState(false)
 
-  const wordCount = countWords(prompt)
+  // Character-based prompt limit
+  const charCount = prompt.length
 
   // Pre-fill from draftPrompt (set by Prompt Lab) on mount, then clear it
   useEffect(() => {
@@ -73,22 +82,36 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
   }
 
   const handleOptimize = async () => {
-    if (!prompt.trim() || wordCount > MAX_PROMPT_WORDS) return
+    if (!prompt.trim() || charCount > MAX_PROMPT_CHARS) return
     setIsLoading(true)
     try {
       const data = await optimizePrompt({ prompt, strategy })
       setResult(data)
       setCopied(false)
-      addCO2Saved(data.savings)
-      if (data.persisted) {
+
+      // Only update the global CO2 counter when the reward was actually awarded
+      if (data.awarded) {
+        addCO2Saved(data.savings)
+      }
+
+      if (data.persisted && data.awarded) {
         await refreshProfile()
         await refreshGardenData(true)
         toast.success(`Hunted! Saved ${data.savings.toFixed(3)}g CO2 and earned ${data.coins_awarded} coins!`)
-      } else {
+      } else if (!user) {
+        // Guest: still show result even if no savings
         if (data.claim_token) {
           saveGuestClaimToken(data.claim_token)
         }
-        toast.info(`Hunted! Saved ${data.savings.toFixed(3)}g CO2. Log in to earn coins!`)
+        if (data.awarded) {
+          toast.info(`Hunted! Saved ${data.savings.toFixed(3)}g CO2. Log in to earn coins!`)
+        } else {
+          const msg = data.reason ? (REASON_MESSAGES[data.reason] ?? data.reason) : 'No reward for this optimization.'
+          toast.info(`Hunted! ${msg}`)
+        }
+      } else if (user && !data.awarded) {
+        const msg = data.reason ? (REASON_MESSAGES[data.reason] ?? data.reason) : 'No reward for this optimization.'
+        toast.info(msg)
       }
     } catch (error) {
       if (error instanceof ApiError && error.status === 429) {
@@ -141,9 +164,9 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
             <div className="flex items-center gap-1 p-1 bg-black/40 border border-glass-border rounded-lg" role="radiogroup" aria-label="Compression strategy">
               {(
                 [
-                  { id: 'compress', label: '⚡ Compress', desc: 'Standard density' },
+                  { id: 'compress',   label: '⚡ Compress',  desc: 'Standard density' },
                   { id: 'facts-only', label: '🎯 Facts-Only', desc: 'Extract factual specs' },
-                  { id: 'bullets', label: '📋 Bullets', desc: 'Concise bullet points' },
+                  { id: 'bullets',    label: '📋 Bullets',   desc: 'Concise bullet points' },
                 ] as const
               ).map((s) => (
                 <button
@@ -175,22 +198,23 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
                        focus:outline-none focus:border-neon-green focus:ring-2 focus:ring-neon-green/30
                        transition-all duration-300 placeholder:text-muted-foreground"
           />
+          {/* Character counter */}
           <div className="flex justify-end mt-1.5 px-1">
             <span
               className={`text-xs font-mono transition-colors ${
-                wordCount > MAX_PROMPT_WORDS
+                charCount > MAX_PROMPT_CHARS
                   ? 'text-neon-red font-semibold'
-                  : wordCount >= MAX_PROMPT_WORDS * 0.9
+                  : charCount >= MAX_PROMPT_CHARS * 0.9
                   ? 'text-amber-400'
                   : 'text-muted-foreground'
               }`}
             >
-              {wordCount} / {MAX_PROMPT_WORDS} words
+              {charCount.toLocaleString()} / {MAX_PROMPT_CHARS.toLocaleString()} characters
             </span>
           </div>
           <button
             onClick={handleOptimize}
-            disabled={isLoading || !prompt.trim() || wordCount > MAX_PROMPT_WORDS}
+            disabled={isLoading || !prompt.trim() || charCount > MAX_PROMPT_CHARS}
             className="mt-4 w-full py-3 px-6 bg-neon-green/20 border border-neon-green text-neon-green 
                        font-mono font-bold rounded-xl hover:bg-neon-green/30 transition-all duration-300
                        disabled:opacity-50 disabled:cursor-not-allowed
@@ -202,7 +226,7 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
               <>
                 <span>⚡ Hunt the Monster</span>
                 <span className="text-[11px] font-normal opacity-80 mt-0.5">
-                  Give a prompt of {MAX_PROMPT_WORDS} words or fewer
+                  Give a prompt of {MAX_PROMPT_CHARS.toLocaleString()} characters or fewer
                 </span>
               </>
             )}
@@ -219,7 +243,7 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
           className="w-full max-w-6xl"
         >
           {/* Guest Mode Banking Callout */}
-          {!user && (
+          {!user && result.awarded && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
@@ -250,9 +274,17 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
             <div className="h-10 w-px bg-glass-border" />
             <div className="text-center">
               <p className="text-xs font-mono text-muted-foreground">Coins Earned</p>
-              <p className="text-2xl font-bold text-neon-green neon-text">🪙 {result.coins_awarded}</p>
-              {!result.persisted && (
-                <span className="text-[10px] font-mono text-yellow-400 block">Log in to save</span>
+              {result.awarded ? (
+                <>
+                  <p className="text-2xl font-bold text-neon-green neon-text">🪙 {result.coins_awarded}</p>
+                  {!result.persisted && (
+                    <span className="text-[10px] font-mono text-yellow-400 block">Log in to save</span>
+                  )}
+                </>
+              ) : (
+                <p className="text-xs font-mono text-muted-foreground mt-1 max-w-[140px]">
+                  {result.reason ? (REASON_MESSAGES[result.reason] ?? result.reason) : 'No reward.'}
+                </p>
               )}
             </div>
             <div className="h-10 w-px bg-glass-border" />
@@ -268,8 +300,8 @@ export function MonsterHunt({ onNavigate: _onNavigate }: { onNavigate?: (screen:
             <div className="text-center">
               <p className="text-xs font-mono text-muted-foreground">CO2 Reduction</p>
               <p className="text-2xl font-bold text-neon-green neon-text">
-                {result.original.co2 > 0 
-                  ? Math.round((result.savings / result.original.co2) * 100) 
+                {result.original.co2 > 0
+                  ? Math.round((result.savings / result.original.co2) * 100)
                   : 0}%
               </p>
             </div>
